@@ -1,0 +1,30 @@
+package hype.s23.camera;
+import android.content.Context;
+import android.hardware.camera2.*;
+import android.hardware.camera2.params.*;
+import android.media.*;
+import android.util.*;
+import java.util.*;
+final class Capabilities {
+ static final int[][] MODES={{1280,720,30,60,120},{1920,1080,30,60,120},{3840,2160,30,60,120},{7680,4320,24,30}};
+ static String key(int w,int h,int fps){return w+"x"+h+"@"+fps;}
+ static int quality(int w){switch(w){case 1280:return CamcorderProfile.QUALITY_720P;case 1920:return CamcorderProfile.QUALITY_1080P;case 3840:return CamcorderProfile.QUALITY_2160P;case 7680:return CamcorderProfile.QUALITY_8KUHD;default:return -1;}}
+ static boolean encoder(int w,int h,int fps){
+  try{for(MediaCodecInfo info:new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos())if(info.isEncoder()&&info.isHardwareAccelerated())for(String type:info.getSupportedTypes())if("video/avc".equalsIgnoreCase(type)||"video/hevc".equalsIgnoreCase(type))try{MediaCodecInfo.CodecCapabilities c=info.getCapabilitiesForType(type);boolean surface=false;for(int format:c.colorFormats)if(format==MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)surface=true;if(surface&&c.getVideoCapabilities().areSizeAndRateSupported(w,h,fps))return true;}catch(RuntimeException ignored){} }catch(RuntimeException ignored){}return false;
+ }
+ static boolean profile(String id,int w,int h,int fps){try{EncoderProfiles p=CamcorderProfile.getAll(id,quality(w));if(p!=null)for(EncoderProfiles.VideoProfile v:p.getVideoProfiles())if(v.getWidth()==w&&v.getHeight()==h&&v.getFrameRate()==fps)return true;}catch(RuntimeException ignored){}return false;}
+ static boolean supported(CameraCharacteristics c,String id,int w,int h,int fps){
+  try{StreamConfigurationMap map=c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);Size size=new Size(w,h);
+   if(map==null||map.getOutputSizes(MediaRecorder.class)==null||!Arrays.asList(map.getOutputSizes(MediaRecorder.class)).contains(size))return false;
+   long duration=map.getOutputMinFrameDuration(MediaRecorder.class,size);if(duration<=0||duration>1_010_000_000L/fps)return false;
+   Range<Integer>[] ranges=c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);boolean rate=false;if(ranges!=null)for(Range<Integer> r:ranges)if(r.getUpper()==fps)rate=true;
+   if(!rate)return false;
+   return profile(id,w,h,fps)||encoder(w,h,fps);
+  }catch(Throwable ignored){return false;}
+ }
+ static Map<String,Set<String>> scan(Context context,int facing){Map<String,Set<String>> result=new LinkedHashMap<>();try{CameraManager m=context.getSystemService(CameraManager.class);if(m==null)return result;for(String id:m.getCameraIdList()){CameraCharacteristics c=m.getCameraCharacteristics(id);Integer f=c.get(CameraCharacteristics.LENS_FACING);if(f==null||f!=facing)continue;Set<String> modes=new LinkedHashSet<>();for(int[] row:MODES)for(int i=2;i<row.length;i++)if(supported(c,id,row[0],row[1],row[i]))modes.add(key(row[0],row[1],row[i]));result.put(id,modes);}}catch(Throwable e){result.clear();}return result;}
+ static Set<String> common(Map<String,Set<String>> map){Set<String> all=null;for(Set<String>s:map.values()){if(all==null)all=new HashSet<>(s);else all.retainAll(s);}return all==null?Collections.emptySet():all;}
+ static boolean allHdr(Context c,boolean video){try{CameraManager m=c.getSystemService(CameraManager.class);boolean found=false;for(String id:m.getCameraIdList()){CameraCharacteristics ch=m.getCameraCharacteristics(id);Integer facing=ch.get(CameraCharacteristics.LENS_FACING);if(facing==null||facing!=CameraCharacteristics.LENS_FACING_BACK)continue;found=true;if(video){if(android.os.Build.VERSION.SDK_INT<33)return false;DynamicRangeProfiles p=ch.get(CameraCharacteristics.REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES);if(p==null||(!p.getSupportedProfiles().contains(DynamicRangeProfiles.HDR10)&&!p.getSupportedProfiles().contains(DynamicRangeProfiles.HDR10_PLUS)&&!p.getSupportedProfiles().contains(DynamicRangeProfiles.HLG10)))return false;}else{int[] modes=ch.get(CameraCharacteristics.CONTROL_AVAILABLE_SCENE_MODES);boolean hdr=false;if(modes!=null)for(int mode:modes)if(mode==CameraCharacteristics.CONTROL_SCENE_MODE_HDR)hdr=true;if(!hdr)return false;}}return found;}catch(Throwable e){return false;}}
+ static Set<String> wideModes(Context c,boolean flash){try{CameraManager m=c.getSystemService(CameraManager.class);Map<String,Set<String>> wide=new LinkedHashMap<>();Map<String,Double> angle=new LinkedHashMap<>();double min=Double.MAX_VALUE,max=0;for(String id:m.getCameraIdList()){CameraCharacteristics ch=m.getCameraCharacteristics(id);if(!Integer.valueOf(CameraCharacteristics.LENS_FACING_BACK).equals(ch.get(CameraCharacteristics.LENS_FACING)))continue;if(ch.getPhysicalCameraIds().size()>0)continue;float[] f=ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);SizeF s=ch.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE);if(f==null||f.length!=1||s==null||f[0]<=0)continue;double a=s.getWidth()/f[0];angle.put(id,a);min=Math.min(min,a);max=Math.max(max,a);}if(angle.size()<2||max/min<1.25)return Collections.emptySet();for(String id:angle.keySet())if(angle.get(id)>=max*0.90){CameraCharacteristics ch=m.getCameraCharacteristics(id);if(flash&&!Boolean.TRUE.equals(ch.get(CameraCharacteristics.FLASH_INFO_AVAILABLE)))return Collections.emptySet();Set<String> modes=new HashSet<>();for(int[] row:MODES)for(int i=2;i<row.length;i++)if(supported(ch,id,row[0],row[1],row[i]))modes.add(key(row[0],row[1],row[i]));wide.put(id,modes);}return common(wide);}catch(Throwable e){return Collections.emptySet();}}
+ static String highSpeed(Context c){StringBuilder b=new StringBuilder();try{CameraManager m=c.getSystemService(CameraManager.class);for(String id:m.getCameraIdList()){StreamConfigurationMap map=m.getCameraCharacteristics(id).get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);if(map==null)continue;for(Size size:map.getHighSpeedVideoSizes())b.append(id).append(": ").append(size).append(" ").append(Arrays.toString(map.getHighSpeedVideoFpsRangesFor(size))).append('\n');}}catch(Throwable ignored){}return b.length()==0?"None reported":b.toString();}
+}
