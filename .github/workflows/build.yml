@@ -1,11 +1,20 @@
 name: Build Camera Enhancement APK
-on: [push, workflow_dispatch]
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
 permissions:
   contents: read
+  statuses: write
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
+      - name: Report build started
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=pending -f context=UniversalCamera/APK -f target_url="$RUN_URL" -f description="APK build started"
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
@@ -16,12 +25,47 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - run: gradle --no-daemon :app:assembleDebug
+      - name: Compile APK
+        id: compile
+        run: |
+          set -o pipefail
+          gradle --no-daemon :app:assembleDebug --stacktrace 2>&1 | tee build.log
+      - name: Verify signed APK
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$APK"
+          unzip -t "$APK"
+          unzip -p "$APK" assets/xposed_init
       - run: bash -n root/customize.sh
       - run: python3 pack.py dist/Samsung-Camera-Enhancement-v2.1-full.zip app/build/outputs/apk/debug/app-debug.apk
       - uses: actions/upload-artifact@v4
+        id: artifact
         with:
           name: Samsung-Camera-Enhancement-v2.1
+          if-no-files-found: error
           path: |
             app/build/outputs/apk/debug/app-debug.apk
             dist/Samsung-Camera-Enhancement-v2.1-full.zip
+      - name: Save build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: build.log
+          if-no-files-found: ignore
+      - name: Report result
+        if: always()
+        env:
+          JOB_RESULT: ${{ job.status }}
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+        run: |
+          state=failure
+          description="Build or packaging failed; open run for logs"
+          url="$RUN_URL"
+          if [ "$JOB_RESULT" = success ]; then
+            state=success
+            description="Signed APK and module ZIP verified"
+            url="${ARTIFACT_URL:-$RUN_URL}"
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state="$state" -f context=UniversalCamera/APK -f target_url="$url" -f description="$description"
